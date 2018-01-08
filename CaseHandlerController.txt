@@ -1,0 +1,715 @@
+public class CaseHandlerController
+{   
+    static OutBoundWrapper outHandler             = new OutBoundWrapper();
+    //static CaseTriggerDBUtilities csDBUtils       = new CaseTriggerDBUtilities(); 
+    OutboundWrapperUtilities outBndWrprUtil = new OutboundWrapperUtilities();
+    public static final  String stg_contract_error ='Contract Error' ;
+     public static final  String Str_Yes='Yes' ;
+     
+    Public static final Id Caserectypeid = Schema.SObjectType.Case.getRecordTypeInfosByName().get('ATG Order Entry').getRecordTypeId();
+    
+    public static final List<String>  REJECTION_TEAM_ROLES = new List<String>{'Business Development Consultant', 'Business Development Engineer', 'Performance Consultant', 'Dealer Success Consultant', 'Inside Dealer Success Consultant', 'Inside Business Development Consultant'};   
+        
+    public static void onBeforeInsert(List<Case> caseList){
+        /*
+Instead of coding the logic here, call a method by passing caseList
+*/          system.debug('========IN onBeforeInsert');
+        updateOwnerOnCase(caseList, true);/* true indicates this is create */
+        setOrderCasePriorityToContractPriority(caseList);   
+        updateCaseSubjectLineOnQAFail(caseList);
+        insertContractCreatedByOwnerFMConfig(caseList);
+        updateESOCreatedBywithContractValue(caseList);
+        // updateSystemCaseRouting(caseList);
+        beforeSaleforceMediaCaseInsertViaEmail(caseList);
+        // Praveen added below line to populate the fiels when case insert from email
+            system.debug('calling method');
+            populateUserOrContactFieldsonCaseFromEmail(caseList);
+        
+    }
+
+    /*
+    When Case are create via Email-To-Case flow, the below function populates the 
+    Contact Email and Contact Name, in the Case using the SuppliedEmail
+    */    
+    public static void beforeSaleforceMediaCaseInsertViaEmail(List<Case> caseList){
+        String contactEmail;
+        String contactName;
+        String webEmail;
+        Id SnowRecordType = Schema.SObjectType.Case.getRecordTypeInfosByName().get('Salesforce Support - Media').getRecordTypeId();
+        for (Case caseobj : caseList){
+            if(caseobj.RecordTypeId == SnowRecordType && String.isBlank(caseobj.Contact_Email__c) &&
+                String.isNotBlank(caseobj.SuppliedEmail)){
+                webEmail = caseobj.SuppliedEmail;
+                system.debug('==========ALL CARTERIA SATISFIED');
+                List<User> users = [Select Id,Name from User where email=:webEmail];
+                for(User user : users){
+                   contactName = user.Name; 
+                }
+                caseobj.Contact_Email__c = webEmail;
+                caseobj.Contact_Name__c = contactName;
+
+                system.debug('==========contactName = '+ contactName);
+            }
+            system.debug('==========CASE OBJ = '+ caseobj);
+        }
+    
+    }
+    
+    public static void onBeforeUpdate(List<Case> caseList, Map<Id, Case> mapCaseOld){
+        /*
+Instead of coding the logic here, call a method by passing caseListand mapCaseOld
+*/
+        updateOwnerOnCase(caseList, false);  
+        updateContractWithOrderEntryCase(caseList, mapCaseOld);
+        updateOrderCasePriorityToContractPriority(caseList, mapCaseOld);   
+        updateESOCreatedBywithContractValue(caseList);
+        
+    }
+    
+    public static void onAfterInsert(List<Case> caseList){
+        /*
+Instead of coding the logic here, call a method by passing caseListand 
+*/
+        updateParentCaseNew(caseList);
+        addContractWithOrderEntryCase(caseList);
+        updateIncidentOnCaseInsert(caselist);
+    }
+    
+    public static void onAfterUpdate(List<Case> caseList, Map<Id, Case> mapCaseOld){
+        /*
+Instead of coding the logic here, call a method by passing caseListand and mapCaseOld
+*/      
+        createTaskOnContractReject(caseList,mapCaseOld);
+        updateParentOnChildClose(caseList,mapCaseOld);
+        updateOpportunityoncaserejected(caselist) ;
+        updateIncidentOnCaseUpdate(caselist);
+    }
+
+    public static void updateIncidentOnCaseUpdate(List<Case> caseList) {
+        String lstModBy;
+        Boolean retIdMatch;
+        Id SnowRecordType = Schema.SObjectType.Case.getRecordTypeInfosByName().get('Salesforce Support - Media').getRecordTypeId();
+        OutboundWrapperUtilities outBndWrprUtil = new OutboundWrapperUtilities();
+        for (Case caseobj : caseList){
+            lstModBy = String.valueOf(caseobj.LastModifiedById);
+            retIdMatch = outBndWrprUtil.checkSNOWId(lstModBy);
+            if(!retIdMatch && caseobj.SNOW_ID__c != null && caseobj.RecordTypeId == SnowRecordType){
+                 callOutboundWrapper();   
+            }
+        }
+    }
+
+    public static void updateIncidentOnCaseInsert(List<Case> caseList) {
+        Id SnowRecordType = Schema.SObjectType.Case.getRecordTypeInfosByName().get('Salesforce Support - Media').getRecordTypeId();
+        String lstModBy;
+        Boolean retIdMatch;
+        OutboundWrapperUtilities outBndWrprUtil = new OutboundWrapperUtilities();
+        for (Case caseobj : caseList){
+            lstModBy = String.valueOf(caseobj.LastModifiedById);
+            retIdMatch = outBndWrprUtil.checkSNOWId(lstModBy);
+            if(!retIdMatch && caseobj.RecordTypeId == SnowRecordType){
+                 callOutboundWrapperForInsert();   
+            }
+        }
+    }
+
+     public static void callOutboundWrapper(){
+        outHandler.Source = 'ServiceNow';
+        outHandler.InvokedFromClass =''; // Setting it to blank so we dont sent comments during case updates
+        outHandler.StandardFiledSet = 'MediaServiceNowStandardFieldSet';
+        outHandler.Destination = 'SNOW';
+        outHandler.onAfterupdate(Trigger.new,'Case','MediaServiceNowMuleSoft','case');
+      }
+
+      public static void callOutboundWrapperForInsert(){
+        outHandler.Source = 'ServiceNow';
+        outHandler.InvokedFromClass ='CaseHeader';
+        outHandler.StandardFiledSet = 'MediaServiceNowStandardFieldSet';
+        outHandler.Destination = 'SNOW';
+        outHandler.onAfterinsert(Trigger.new,'Case','MediaServiceNowMuleSoft','case');
+      }
+
+   
+   //Update Opportunity Status to Contract Error when Case Contract_Rejected__c is Rejected
+    public static void updateOpportunityoncaserejected(List<Case> caseList) {
+     
+     
+     set<id> orderids ;
+     
+       list<opportunity> lstopp = new list<opportunity>() ;
+       set<id> oppids = new set<id>() ;
+       list<case> lstcase =[select id,Case_Order__r.OpportunityId from case where 
+       id =:caselist and recordtypeid=:caserectypeid and Contract_Rejected__c= :Str_Yes  ] ;
+       if(lstcase.size() > 0) {
+           for(case ord :lstcase) {
+              oppids.add(ord.Case_Order__r.OpportunityId ) ;
+           
+           
+           }
+        
+       }
+     lstopp=[select id,stagename from opportunity where id=:oppids] ;
+    
+     if (lstopp.size()>0) {
+      for (opportunity op :lstopp){
+          op.stagename=stg_contract_error ;
+      
+      }
+         update lstopp ;
+     
+     }  
+    
+     }
+    
+    public static void updateParentOnChildClose(List<Case> caseList, Map<Id, Case> mapCaseOld)
+    {
+        RecordType rt = [select Id, Name from RecordType where Name = 'ATC Dealer Service - HomeNet' and SobjectType = 'Case'];    
+        
+        List<Case> casesToUpdate = new List<Case>();
+        Set<Id> parentCaseId = new Set<Id>();
+        
+        for (case c: caseList)
+        { 
+            Case oldCase = mapCaseOld.get(c.Id);
+            
+            if (c.ParentId != null && c.Status == 'Closed' && c.Status!= oldCase.Status)
+            {           
+                /* update parent status */
+                Case parentCase = new Case();
+                parentCase.Id = c.ParentId;
+                
+                parentCase.ATC_One_and_Done__c = 'No';      
+                parentCaseId.add(c.ParentId);
+                Case existingParent = [select Id,Priority, Status From Case  Where Id in :parentCaseId LIMIT 1];
+                if (existingParent.Priority != 'High')
+                    parentCase.Priority = 'Medium';           
+                parentCase.Status = 'Work In Progress';          
+                // if status is awaiting internal then workflow will change priority
+                
+                // Update Parent Case
+                casesToUpdate.add(parentCase);
+            }                     
+        }
+        if (!casesToUpdate.isEmpty())
+        {
+            update casesToUpdate;
+        }     
+    }
+    public static void updateParentCaseNew(List<Case> caseList)
+    {
+        List<Case> casesToUpdate = new List<Case>();
+        
+        for (case c: caseList)
+        {
+            system.debug('LYNN:parent:'+c.Parent.CaseNumber);
+            system.debug('LYNN:case number'+c.CaseNumber);
+            
+            if (c.ParentId != null)
+            {
+                /* update parent status */
+                Case parentCase = new Case();
+                parentCase.Id = c.ParentId;
+                parentCase.Status = 'Awaiting Internal';
+                parentCase.ATC_One_and_Done__c = 'No';
+                parentCase.HasChildCases__c = true;
+                system.debug('LYNN:added parent to update');
+                // Update Parent Case
+                casesToUpdate.add(parentCase);          
+                
+            }
+        }
+        if (!casesToUpdate.isEmpty())
+        {
+            update casesToUpdate;
+        }    
+    }
+    public static void updateOwnerOnCase(List<Case> caseList, boolean isCaseCreation)
+    {
+        for (case c: caseList)
+        {
+            if (c.ATC_Co_op__c == 'Yes' && c.ATC_Rework_Approval_Status__c == 'Rejected' && c.Status == 'QA Complete' )
+            {
+                system.debug('CreatedByOwner:'+ c.CreatedById);
+                system.debug('Previous_Owner:'+ c.Previous_Owner__c);
+                if (c.Previous_Owner__c != null)
+                    c.OwnerId = c.Previous_Owner__c;
+                else
+                    c.OwnerId = c.CreatedById;
+            }
+            if (c.Status == 'Design Complete')
+            {
+                c.Previous_Owner__c = UserInfo.getUserId();
+            }
+            system.debug('---------c.Task_Type__c'+c.Task_Type__c);
+            if (c.Task_Type__c == 'Back To Contract' && c.Status != 'Closed' && isCaseCreation == true)
+            {
+                List<Contract> esoInfo = [SELECT Id, eSO_Created_By__c from Contract where Id =: c.Contract__c LIMIT 1];
+                system.debug('------esoinfo-----'+esoInfo);
+                List<Group> esoQ = [SELECT Id from Group where Name = 'ESO Order Entry' and Type = 'Queue'];
+                system.debug('------esoQ-----'+esoQ);
+                c.Priority = 'High';
+                if (!esoInfo.isEmpty())
+                {
+                    if (esoInfo[0].eSO_Created_By__c != null)
+                    {
+                        List<User> ownerInfo = [SELECT Id, Net_ID__c from User where Net_ID__c =: esoInfo[0].eSO_Created_By__c LIMIT 1];
+                        
+                        if (!ownerInfo.isEmpty())
+                        {
+                            c.OwnerId = ownerInfo[0].Id;
+                            c.eSO_Created_By__c = ownerInfo[0].Id;              
+                        }
+                        else if (!esoQ.isEmpty())
+                            c.OwnerId = esoQ[0].Id;
+                    }
+                    else if (!esoQ.isEmpty())
+                        c.OwnerId = esoQ[0].Id;
+                }
+                else if (!esoQ.isEmpty())
+                    c.OwnerId = esoQ[0].Id;
+                
+            }    
+        }
+    }
+    public static void addContractWithOrderEntryCase(List<Case> caseList)
+    {
+        
+        // if order id is added to new case, search for contract with same order id and create a relationship
+        // this also sets the case priority to the priority of the contract
+        for (case c: caseList)
+        {
+            if (c.Order_ID__c != null)
+            {
+                //find all contracts with this id and update them with this case id
+                List<Contract> allCon = [select Id,Order_Cases__c,ATC_Order_Sys_ID__c, ATC_Priority_Code__c, contractnumber from Contract where ATC_Order_Sys_ID__c = : c.Order_ID__c];
+                system.debug('##### allCon'+ allCon);
+                for (Contract con: allCon)
+                {
+                    system.debug('##### allCon cases'+ con.Order_Cases__c);
+                    Case caseUpd = new Case();
+                    Contract contractUpd = new Contract();
+                    contractUpd.Id = con.Id;
+                    caseUpd.Id = c.Id;
+                    contractUpd.Order_Cases__c = c.Id;
+                    system.debug('added case '+c.casenumber+' to contract '+con.contractnumber);
+                    system.debug('contract on case before:'+c.contract__c);
+                    caseUpd.contract__c = con.Id;
+                    system.debug('contract on case after:'+caseUpd.contract__c);
+                    if (con.ATC_Priority_Code__c == 'Medium' && c.Task_Type__c != 'Back To Contract')
+                        caseUpd.Priority = 'Low';
+                    else if (con.ATC_Priority_Code__c == 'High')
+                        caseUpd.Priority = 'High';              
+                    //cannot use best practice here and must update in for loop because case could be updated twice with different contracts assoc.          
+                    system.debug('##### updated contract'+ contractUpd.Id + '::'+contractUpd);
+                    system.debug('##### updated case'+ caseUpd.Id + '::'+caseUpd.casenumber+ '::'+caseUpd);             
+                    update caseUpd;
+                    update contractUpd;
+                    
+                }
+                
+            }
+        }
+        
+        
+    }
+    public static void updateContractWithOrderEntryCase(List<Case> caseList, Map<Id, Case> mapCaseOld)
+    {
+        List<contract> contractsToUpdate = new List<contract>();
+        // if order id is added to new case, search for contract with same order id and create a relationship
+        // this also sets the case priority to the priority of the contract
+        for (case c: caseList)
+        {
+            Case oldCase = mapCaseOld.get(c.Id);
+            
+            if ((c.Order_ID__c != oldCase.Order_ID__c) ) //order id changed and it isnt a closed case
+            {
+                //find all contracts with this id and update them with this case id if eso order id not blank
+                if (oldCase.Order_ID__c != null)
+                {
+                    //remove contracts from this case
+                    List<Contract> allConOld = [select Id,Order_Cases__c,ATC_Order_Sys_ID__c from Contract where ATC_Order_Sys_ID__c = : oldCase.Order_ID__c];
+                    system.debug('##### allConOld'+ allConOld);
+                    for (Contract con: allConOld)
+                    {
+                        system.debug('##### allConOld cases'+ con.Order_Cases__c);
+                        
+                        system.debug('removing a case from contract '+con.Order_Cases__c);
+                        con.Order_Cases__c = null;
+                        
+                        contractsToUpdate.add(con);
+                        c.contract__c = null;
+                    }
+                }
+                if (c.Order_ID__c != null)
+                {
+                    List<Contract> allCon = [select Id,Order_Cases__c,ATC_Order_Sys_ID__c, ATC_Priority_Code__c,contractnumber from Contract where ATC_Order_Sys_ID__c = : c.Order_ID__c];
+                    system.debug('##### allCon'+ allCon);
+                    for (Contract con: allCon)
+                    {
+                        system.debug('##### allCon cases'+ con.Order_Cases__c);
+                        
+                        con.Order_Cases__c = c.Id;
+                        system.debug('Associating contract '+con.contractnumber+'with case '+c.casenumber);
+                        contractsToUpdate.add(con);
+                        c.contract__c = con.Id;
+                        if (con.ATC_Priority_Code__c == 'Medium'  && c.Task_Type__c != 'Back To Contract' )
+                            c.Priority = 'Low';
+                        else if (con.ATC_Priority_Code__c == 'High')
+                            c.Priority = 'High';                        
+                        system.debug('Associating case with contract'+ con.contractnumber + '::'+con);
+                        system.debug('##### case updated'+ c.Id + '::'+c.casenumber+ '::'+c);
+                    }              
+                }
+                
+            }
+        }
+        if (!contractsToUpdate.isEmpty())
+        {
+            update contractsToUpdate;   
+        }
+        system.debug('##### update cases:'+contractsToUpdate);
+    }
+    public static void createTaskOnContractReject(List<Case> caseList, Map<Id, Case> mapCaseOld)
+    {
+        List<Task> tasksToUpdate = new List<Task>();
+        RecordType rt = [select Id, Name from RecordType where Name = 'ATG Order Entry' and SobjectType = 'Case'];    
+        RecordType rtTsk = [select Id, Name from RecordType where Name = 'AC Consultants' and SobjectType = 'Task'];    
+        
+        // automating the generation of a task for contracts that are rejected.
+        String comment1 = 'Hello, \n';
+        String comment2 = 'We are unable to process the attached package: ';
+        String comment3 = ' Sales Order for the following reasons:\n\n';
+        String comment4 = '\n\nPlease submit a revised Sales Order with the information needed.\nShould you have any questions, you can reach us by e-mail at dealersupportemails@autotrader.com or \n by calling 1-877-353-9360, Monday - Friday 8am - 10pm EST, Saturday, 9am - 6pm EST.';
+        String comment5 = 'Contract Rejection Reasons: \n';
+        String comment6 = '\n\n';
+        
+        Set<Id> accountIds = new Set<Id>();
+        for(Case theCase: caseList){
+            accountIds.add(theCase.AccountId);
+        }
+        
+        Map<Id, Account> accountMap = new Map<Id, Account>([Select Id, Name FROM Account WHERE Id IN : accountIds]);
+        Map<Id, List<AccountTeamMember>> accountToTeamMemberMap = new Map<Id, List<AccountTeamMember>>();
+        
+        //add account team members to map by making one query so don't have to query in the loop
+        for(AccountTeamMember teamMember : [Select AccountId, Account.Name, Id, UserId,User.IsActive, User.Manager.Id, User.Manager.isActive, TeamMemberRole   
+                                            From AccountTeamMember where TeamMemberRole IN :REJECTION_TEAM_ROLES AND AccountId IN :accountIds]){
+                                                
+                                                /*if there is already a value in the map for the account id, then get the list and add the teammember because can be more than
+one team member per account*/
+                                                if(Null != accountToTeamMemberMap.get(teamMember.AccountId)){
+                                                    accountToTeamMemberMap.get(teamMember.AccountId).add(teamMember);
+                                                }
+                                                //otherwise put the account id in the map and then add the teammember to the list
+                                                else{  
+                                                    List<AccountTeamMember> tempTeamList = new List<AccountTeamMember>{teamMember};                                               
+                                                        accountToTeamMemberMap.put(teamMember.AccountId, tempTeamList);
+                                                }
+                                                
+                                            }
+        //initialize account team list that will be pulled by case account id from the map within the loop 
+        List<AccountTeamMember> atms = new List<AccountTeamMember>();
+        for (case c: caseList)
+        {
+            if (!TriggerRunOnce.isAlreadyDone(c.Id)) 
+            {
+                
+                // if the order entry case contract rejection changed  and set to yes then create task
+                Case oldCase = mapCaseOld.get(c.Id);           
+                if (c.Contract_Rejected__c == 'Yes' && c.Contract_Rejected__c != oldCase.Contract_Rejected__c && c.RecordTypeId == rt.Id)
+                {
+                    
+                    system.debug('Case:'+c.AccountId);
+                    system.debug('the case account is ' + c.Account.Name);
+                    
+                    if(Null != accountToTeamMemberMap.get(c.AccountId)){
+                        atms = accountToTeamMemberMap.get(c.AccountId);
+                    }
+                    if(!atms.isEmpty()){
+                        for(AccountTeamMember atm : atms){
+                            Task newTask = new Task();
+                            boolean ownerFound = false;
+                            
+                            if (atm.User.IsActive == true)
+                            {
+                                newTask.OwnerId = atm.UserId;
+                                ownerFound = true;
+                            }
+                            else if (atm.User.Manager.Id != null)
+                            {                  
+                                if (atm.User.Manager.IsActive == true)
+                                {
+                                    ownerFound = true;
+                                    newTask.OwnerId = atm.User.Manager.Id ;                           
+                                }                   
+                            }
+                            
+                            if (ownerFound == false)
+                            {
+                                newTask.OwnerId = c.OwnerId;
+                            }
+                            System.debug('the atm account id is ' + atm.AccountId);
+                            //if the case doesn't have an account. Is this even possible?
+                            if (c.AccountId != null){
+                                newTask.Subject = atm.Account.Name +' - '+c.Account_SVOC_Id__c+': Contract Rejected - Re-Submit Sales Order';
+                            }
+                            else{
+                                newTask.Subject = 'Unknown Account - '+c.Account_SVOC_Id__c+': Contract Rejected - Re-Submit Sales Order';
+                            }
+                            buildTaskDetails(newTask, c, rtTsk, comment1, comment2, comment3, comment4, comment5, comment6) ; 
+                            tasksToUpdate.add(newTask);
+                        }
+                    }
+                    else{
+                        Task newTask = new Task();
+                        if (c.AccountId != null && accountMap.containsKey(c.AccountId)){
+                            String accountName = accountMap.get(c.AccountId).Name;
+                            newTask.Subject = accountName +' - '+c.Account_SVOC_Id__c+': Contract Rejected - Re-Submit Sales Order';
+                        }   
+                        buildTaskDetails(newTask, c, rtTsk, comment1, comment2, comment3, comment4, comment5, comment6) ; 
+                        tasksToUpdate.add(newTask); 
+                    }
+                    
+                    TriggerRunOnce.setAlreadyDone(c.Id);  
+                }
+            }               
+        }
+        if (!tasksToUpdate.isEmpty())
+        {
+            // add code to trigger email notification
+            //Set EmailHeader.triggerUserEmail to true
+            Database.DMLOptions dmlo = new Database.DMLOptions();
+            dmlo.EmailHeader.triggerUserEmail = true;    
+            database.insert( tasksToUpdate,dmlo);
+        }
+    }
+    
+    public static void buildTaskDetails(Task newTask, Case c, RecordType rtTsk, String comment1, String comment2, String comment3, String comment4, String comment5, String comment6 ){
+        newTask.WhatId = c.Id;
+        newTask.Type = 'Other';
+        newTask.Priority = 'High';
+        newTask.RecordtypeId = rtTsk.id;
+        newTask.ActivityDate = Date.today();
+        newTask.ActivityDate =newTask.ActivityDate.addDays(1);
+        if (String.isNotBlank(c.Contract_Rejection_Comments__c))
+            newTask.Description = comment1 + comment2 + c.Contract_Rejection_Package_Name__c + comment3 + comment5 + c.Contract_Rejection_Reason__c + comment6 + c.Contract_Rejection_Comments__c + comment4;
+        else
+            newTask.Description = comment1 + comment2 + c.Contract_Rejection_Package_Name__c + comment3 + comment5 + c.Contract_Rejection_Reason__c + comment4;
+        
+    }
+    
+    public static void updateCaseSubjectLineOnQAFail(List<Case> caseList)
+    {
+        Set<Id> rtList = new Set<Id>();
+        //use schema rather than query to get record type names
+        rtList.add(Schema.SObjectType.Case.getRecordTypeInfosByName().get('ATG DMD Fulfillment').getRecordTypeId());    
+        rtList.add(Schema.SObjectType.Case.getRecordTypeInfosByName().get('ATG Order Activity').getRecordTypeId());    
+        rtList.add(Schema.SObjectType.Case.getRecordTypeInfosByName().get('ATG Order Activity QA').getRecordTypeId());    
+        system.debug('RTList'+rtList);    
+        Integer LastOwnerIndex;
+        String lastOwnerName;
+        Id lastOwnerId;
+        
+        
+        // altering the subject line of cases that have previously failed QA
+        
+        for (case c: caseList)
+        {     
+            /* get all cases with same contract id and task type */
+            system.debug('The related contract is: '+c.Contract__c+'id:'+ c.Contract__r.Id);
+            if (rtList.contains(c.RecordTypeID))// add code to alleviate soql limits on test
+            {
+                List<Case> allCases = [select Id, Contract__r.Id, Task_Type__c,RecordTypeId, OwnerId, Status, casenumber from Case where Contract__r.Id = : c.Contract__c and RecordTypeId in :rtList and Task_Type__c =: c.Task_Type__c ORDER BY casenumber ASC ];
+                system.debug('##### allCases on this contract: '+ c.Contract__c+'::'+allCases);
+                if (!allCases.isEmpty() && c.Contract__c!=null)
+                {
+                    LastOwnerIndex = allCases.size()-1;
+                    List<User> userOwner = [select Name from user where Id =: allCases[LastOwnerIndex].OwnerId limit 1];
+                    List<Group> queueOwner = [select Name from group where Id =: allCases[LastOwnerIndex].OwnerId limit 1];
+                    if (userOwner.isEmpty())
+                    {
+                        //owner is queue
+                        lastOwnerName = queueOwner[0].Name;
+                        lastOwnerId = queueOwner[0].Id;
+                    }
+                    else
+                    {
+                        //owner is user
+                        lastOwnerName = userOwner[0].Name;
+                        lastOwnerId = userOwner[0].Id;
+                    }
+                    if (c.Task_Type__c!= null)
+                    {
+                        if (c.subject.contains('QA Fail'))
+                            c.subject = c.Task_Type__c +' [QA Fail '+ allCases.size() +', Last Status '+lastOwnerName+']';
+                        else
+                            c.subject = c.Task_Type__c +' [Regenerated '+ allCases.size() +', Last Status '+lastOwnerName+']';
+                        c.priority = 'High';
+                        c.OwnerId = lastOwnerId;
+                        if (c.Task_Type__c!= 'Quality Assurance' && c.Task_Type__c!= 'KBB Quality Assurance')
+                            c.Status = 'Work In Progress';
+                    }
+                    system.debug('subject: '+c.subject+'priority: '+c.priority+'owner Id: '+c.ownerId);
+                }
+            } //end fix for test soql limits   
+        }  
+        
+    }
+    public static void setOrderCasePriorityToContractPriority(List<Case> caseList)
+    {
+        // this also sets the case priority to the priority of the contract
+        for (case c: caseList)
+        {        
+            if ((c.Contract__c != null) ) //case has a contract associated
+            {    
+                system.debug('UPDATING PRIORITY ON CASE TO CONTRACT PRIORITY '+c.Contract__C);
+                Contract con = [select Id,ATC_Priority_Code__c from Contract where Id = : c.Contract__c];
+                system.debug('con: '+con);
+                if (con.ATC_Priority_Code__c == 'Medium'  && c.Task_Type__c != 'Back To Contract')
+                    c.Priority = 'Low';
+                else if (con.ATC_Priority_Code__c == 'High')
+                    c.Priority = 'High';                                   
+                system.debug('PRIORITY UPDATED ON CASE TO CONTRACT PRIORITY '+c.Priority);
+            }
+        }
+    }
+    public static void updateOrderCasePriorityToContractPriority(List<Case> caseList, Map<Id, Case> mapCaseOld)
+    {
+        // this also sets the case priority to the priority of the contract
+        for (case c: caseList)
+        {        
+            Case oldCase = mapCaseOld.get(c.Id);
+            
+            if (c.Contract__c != oldCase.Contract__c && c.Contract__c != null ) //contract changed 
+            {    
+                
+                system.debug('UPDATING PRIORITY ON CASE TO CONTRACT PRIORITY '+c.Contract__C);
+                Contract con = [select Id,ATC_Priority_Code__c from Contract where Id = : c.Contract__c];
+                system.debug('con: '+con);
+                if (con.ATC_Priority_Code__c == 'Medium'  && c.Task_Type__c != 'Back To Contract')
+                    c.Priority = 'Low';
+                else if (con.ATC_Priority_Code__c == 'High')
+                    c.Priority = 'High';                       
+                system.debug('PRIORITY UPDATED ON CASE TO CONTRACT PRIORITY '+c.Priority);
+            }
+        }
+    } 
+    
+    // Create a mechanism, when a case with the task type = Contract FM Config is created, auto associate that case owner with 
+    // the Salesforce user that entered the contract in eSO.  That user is known by the value of the field “eSO Created By (User)
+    // in the contract object.  The value of that field contains the NetID which is part of the User object in Salesforce.  
+    // If the value of the field “eSO Created By (User)” is null, blank, or if does not match with the values of the User object
+    //  in Salesforce, then assign the case owner to ESO Order Entry queue.
+    private static void insertContractCreatedByOwnerFMConfig(List<Case> caseList)
+    {
+        for (case c: caseList)
+        { 
+            if (c.Task_Type__c == 'Contract FM Config')
+            {
+                List<Contract> esoInfo = [SELECT Id, eSO_Created_By__c from Contract where Id =: c.Contract__c LIMIT 1];
+                List<Group> esoQ = [SELECT Id from Group where Name = 'ESO Order Entry' and Type = 'Queue'];
+                if (!esoInfo.isEmpty()) // did i find associated contract
+                {
+                    if (esoInfo[0].eSO_Created_By__c != null)
+                    {
+                        List<User> ownerInfo = [SELECT Id, Net_ID__c from User where Net_ID__c =: esoInfo[0].eSO_Created_By__c LIMIT 1];
+                        if (!ownerInfo.isEmpty())
+                        {// found user
+                            c.OwnerId = ownerInfo[0].Id;
+                            c.eSO_Created_By__c = ownerInfo[0].Id;              
+                        }
+                        else if (!esoQ.isEmpty())//didnt find user so assign to queue
+                            c.OwnerId = esoQ[0].Id;
+                    }
+                    else if (!esoQ.isEmpty()) //couldnt find contract created by
+                        c.OwnerId = esoQ[0].Id;
+                }
+                else if (!esoQ.isEmpty()) //couldnt find contract so assign to queue
+                    c.OwnerId = esoQ[0].Id;
+                
+            }    
+        }   
+    }
+    private static void updateESOCreatedBywithContractValue(List<Case> caseList)
+    {
+        Integer i=0;
+        for (case c: caseList)
+        {  
+           
+            if (c.status != 'Closed' && !(c.Status == 'New')) // add code to alleviate mass close SOQL limits Defect D-03791 
+            {
+                List<Contract> esoInfo = [SELECT Id, eSO_Created_By_User__c from Contract where Id =: c.Contract__c LIMIT 1];
+                if (!esoInfo.isEmpty()) // did i find associated contract field
+                {
+                    c.eSO_Created_By__c = esoInfo[0].eSO_Created_By_User__c;              
+                }
+            }
+            i++;
+        }
+    }
+    /* 
+private static void updateSystemCaseRouting(List<Case> caseList)
+{
+Integer i=0;
+for (case c: caseList)
+{  
+c.System_Case_Routing__c = c.origin;
+
+}
+} 
+*/
+    //Praveen added below method to check the email address of From on the email, which leads to case creation to populate fields
+ public static void populateUserOrContactFieldsonCaseFromEmail(List<Case> caseLst){
+     system.debug('insdie pop method');
+     id validrecordtypeid=Schema.SObjectType.case.getRecordTypeInfosByName().get('ATC Dealer Service').getRecordTypeId();
+     
+     Set<String> emailSet = new Set<String>();
+     for(Case cas: caseLst){
+         if(cas.suppliedEmail!='' && cas.SuppliedEmail!=null && cas.RecordTypeId==validrecordtypeid){
+             emailSet.add(cas.suppliedEmail);
+         }
+     }
+     
+     List<Contact> conLst=[select id,name,email from contact where email =:emailSet and Status__c='Current'];
+     Map<String,List<Contact>> emailContactSetMap = new Map<String,List<Contact>>();
+     for(Contact con: conLst){
+         
+             if(emailContactSetMap.containsKey(con.email)){
+                 List<Contact> tempset = new List<Contact>();
+                 tempset=emailContactSetMap.get(con.email);
+                 tempset.add(con);
+                 emailContactSetMap.put(con.email,tempset);
+             }
+             else{
+                 List<Contact> initialSet = new List<Contact>();
+                 initialSet.add(con);
+                 emailContactSetMap.put(con.email,initialSet);
+             }
+         
+     }
+     
+      List<User> userLst =[Select id,Username,name,email from User where Email =:emailSet and IsActive=true];
+      Map<String,User> emailUserMap = new Map<String,User>();
+      for(User u: userLst){      
+        emailUserMap.put(u.email,u);                      
+      }
+     
+     for(Case c: caseLst){
+         if(c.suppliedEmail!='' && c.SuppliedEmail!=null && c.RecordTypeId==validrecordtypeid){                         
+             if(emailContactSetMap.containsKey(c.suppliedEmail)){
+                 if(emailContactSetMap.get(c.suppliedEmail).size()>0 && emailContactSetMap.get(c.suppliedEmail).size()<2){
+                     system.debug('inside conlst size');
+                     List<Contact> contaLst  = emailContactSetMap.get(c.suppliedEmail);
+                     c.Contactid=contaLst[0].id;
+                     system.debug('inside to upd contact id');
+                 }
+            }else if(emailUserMap.containsKey(c.suppliedEmail)){                
+                 system.debug('inside else if');
+                 c.ATC_Contact__c=emailUserMap.get(c.suppliedEmail).id;
+                system.debug('inside to upd inernal cont id');
+            }
+         }
+     }
+     
+ }
+}
