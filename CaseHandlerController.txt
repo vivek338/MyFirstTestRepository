@@ -1,3 +1,5 @@
+
+//INYVIVS
 public class CaseHandlerController
 {   
     static OutBoundWrapper outHandler             = new OutBoundWrapper();
@@ -5,7 +7,8 @@ public class CaseHandlerController
     OutboundWrapperUtilities outBndWrprUtil = new OutboundWrapperUtilities();
     public static final  String stg_contract_error ='Contract Error' ;
      public static final  String Str_Yes='Yes' ;
-     
+     IF(){
+     }
     Public static final Id Caserectypeid = Schema.SObjectType.Case.getRecordTypeInfosByName().get('ATG Order Entry').getRecordTypeId();
     
     public static final List<String>  REJECTION_TEAM_ROLES = new List<String>{'Business Development Consultant', 'Business Development Engineer', 'Performance Consultant', 'Dealer Success Consultant', 'Inside Dealer Success Consultant', 'Inside Business Development Consultant'};   
@@ -23,7 +26,9 @@ Instead of coding the logic here, call a method by passing caseList
         beforeSaleforceMediaCaseInsertViaEmail(caseList);
         // Praveen added below line to populate the fiels when case insert from email
             system.debug('calling method');
+           IF(XYZ){
             populateUserOrContactFieldsonCaseFromEmail(caseList);
+            }
         
     }
 
